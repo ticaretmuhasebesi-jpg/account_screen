@@ -1,0 +1,288 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:drift/drift.dart' as drift;
+import 'package:uuid/uuid.dart';
+import 'package:go_router/go_router.dart';
+
+import '../../../../data/database/app_database.dart';
+import '../../../../data/database/tables/kart_takvim.dart';
+import '../../../../core/utils/tarih_yardimcisi.dart';
+import '../../domain/hesap.dart';
+
+class HesapEkleScreen extends ConsumerStatefulWidget {
+  final HesaplarData? mevcutHesap; 
+  const HesapEkleScreen({super.key, this.mevcutHesap});
+
+  @override
+  ConsumerState<HesapEkleScreen> createState() => _HesapEkleScreenState();
+}
+
+class _HesapEkleScreenState extends ConsumerState<HesapEkleScreen> {
+  final _formKey = GlobalKey<FormState>();
+  
+  final _adController = TextEditingController();
+  final _bakiyeController = TextEditingController(text: '0');
+  final _limitController = TextEditingController(); 
+  final _kesimGunuController = TextEditingController();
+  final _odemeGunuController = TextEditingController();
+  final _faizOraniController = TextEditingController();
+  final _asgariOranController = TextEditingController();
+
+  HesapTuru _secilenTur = HesapTuru.nakit;
+  bool _kaydediliyor = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.mevcutHesap != null) {
+      final h = widget.mevcutHesap!;
+      _adController.text = h.ad;
+      _bakiyeController.text = h.bakiye.toString();
+      _secilenTur = h.tur;
+      if (h.limitTutari != null) _limitController.text = h.limitTutari.toString();
+      if (h.varsayilanKesimGunu != null) _kesimGunuController.text = h.varsayilanKesimGunu.toString();
+      if (h.varsayilanOdemeGunu != null) _odemeGunuController.text = h.varsayilanOdemeGunu.toString();
+      if (h.faizOrani != null) _faizOraniController.text = h.faizOrani.toString();
+      if (h.asgariOdemeOrani != null) _asgariOranController.text = h.asgariOdemeOrani.toString();
+    }
+  }
+
+  @override
+  void dispose() {
+    _adController.dispose();
+    _bakiyeController.dispose();
+    _limitController.dispose();
+    _kesimGunuController.dispose();
+    _odemeGunuController.dispose();
+    _faizOraniController.dispose();
+    _asgariOranController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _kaydet() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    setState(() => _kaydediliyor = true);
+
+    if (widget.mevcutHesap != null) {
+      try {
+        final db = ref.read(databaseProvider);
+        final h = widget.mevcutHesap!;
+        
+        // 🚨 GÜNCELLEME: replace yerine write kullanıyoruz. Daha güvenli.
+        await (db.update(db.hesaplar)..where((t) => t.id.equals(h.id))).write(
+          HesaplarCompanion(
+            ad: drift.Value(_adController.text.trim()),
+            tur: drift.Value(_secilenTur),
+            bakiye: drift.Value(double.tryParse(_bakiyeController.text) ?? 0.0),
+            limitTutari: drift.Value(_secilenTur == HesapTuru.kmh ? double.tryParse(_limitController.text) : null),
+            varsayilanKesimGunu: drift.Value(int.tryParse(_kesimGunuController.text)),
+            varsayilanOdemeGunu: drift.Value(int.tryParse(_odemeGunuController.text)),
+            faizOrani: drift.Value(double.tryParse(_faizOraniController.text)),
+            asgariOdemeOrani: drift.Value(double.tryParse(_asgariOranController.text)),
+          ),
+        );
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Hesap başarıyla güncellendi!')));
+          context.pop();
+        }
+      } catch (e) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Hata: $e')));
+      } finally {
+        if (mounted) setState(() => _kaydediliyor = false);
+      }
+      return; 
+    }
+
+    try {
+      final db = ref.read(databaseProvider);
+      final yeniId = const Uuid().v4();
+
+      await db.into(db.hesaplar).insert(
+        HesaplarCompanion.insert(
+          id: yeniId,
+          ad: _adController.text.trim(),
+          tur: _secilenTur,
+          bakiye: drift.Value(double.tryParse(_bakiyeController.text) ?? 0.0),
+          limitTutari: drift.Value(_secilenTur == HesapTuru.kmh ? double.tryParse(_limitController.text) : null),
+          varsayilanKesimGunu: drift.Value(
+              _secilenTur == HesapTuru.krediKarti || _secilenTur == HesapTuru.kmh
+                  ? int.tryParse(_kesimGunuController.text)
+                  : null),
+          varsayilanOdemeGunu: drift.Value(
+              _secilenTur == HesapTuru.krediKarti || _secilenTur == HesapTuru.kmh
+                  ? int.tryParse(_odemeGunuController.text)
+                  : null),
+          faizOrani: drift.Value(_secilenTur == HesapTuru.kmh
+              ? double.tryParse(_faizOraniController.text)
+              : null),
+          asgariOdemeOrani: drift.Value(_secilenTur == HesapTuru.kmh
+              ? double.tryParse(_asgariOranController.text)
+              : null),
+        ),
+      );
+
+      if (_secilenTur == HesapTuru.krediKarti || _secilenTur == HesapTuru.kmh) {
+        int kesimGun = int.tryParse(_kesimGunuController.text) ?? 1;
+        int odemeGun = int.tryParse(_odemeGunuController.text) ?? 1;
+        DateTime simdi = DateTime.now();
+        
+        for (int i = 0; i < 12; i++) {
+          DateTime hedefAy = DateTime(simdi.year, simdi.month + i);
+          int gecerliKesimGun = kesimGun > TarihYardimcisi.ayinSonGunu(hedefAy.year, hedefAy.month) ? TarihYardimcisi.ayinSonGunu(hedefAy.year, hedefAy.month) : kesimGun;
+          int gecerliOdemeGun = odemeGun > TarihYardimcisi.ayinSonGunu(hedefAy.year, hedefAy.month) ? TarihYardimcisi.ayinSonGunu(hedefAy.year, hedefAy.month) : odemeGun;
+
+          DateTime kesimTarihi = DateTime(hedefAy.year, hedefAy.month, gecerliKesimGun);
+          DateTime odemeTarihi = DateTime(hedefAy.year, hedefAy.month, gecerliOdemeGun);
+
+          kesimTarihi = TarihYardimcisi.isGununeKaydir(kesimTarihi);
+          odemeTarihi = TarihYardimcisi.isGununeKaydir(odemeTarihi);
+
+          await db.into(db.kartTakvim).insert(
+            KartTakvimCompanion.insert(
+              hesapId: yeniId,
+              yil: hedefAy.year,
+              ay: hedefAy.month,
+              kesimTarihi: kesimTarihi,
+              odemeTarihi: odemeTarihi,
+              durum: const drift.Value('tahmini'),
+            ),
+          );
+        }
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Hesap ve Takvim başarıyla eklendi!')));
+        context.pop();
+      }
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Hata: $e')));
+    } finally {
+      if (mounted) setState(() => _kaydediliyor = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.mevcutHesap != null ? 'Hesabı Düzenle' : 'Yeni Hesap Ekle')),
+      body: Form(
+        key: _formKey,
+        child: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            DropdownButtonFormField<HesapTuru>(
+              value: _secilenTur,
+              decoration: const InputDecoration(labelText: 'Hesap Türü', border: OutlineInputBorder()),
+              items: HesapTuru.values.map((tur) => DropdownMenuItem(value: tur, child: Text(tur.label))).toList(),
+              onChanged: (val) {
+                if (val != null) {
+                  setState(() {
+                    _secilenTur = val;
+                    _limitController.clear();
+                    _kesimGunuController.clear();
+                    _odemeGunuController.clear();
+                    _faizOraniController.clear();
+                    _asgariOranController.clear();
+                  });
+                }
+              },
+            ),
+            const SizedBox(height: 16),
+
+            TextFormField(
+              controller: _adController,
+              decoration: const InputDecoration(labelText: 'Hesap Adı', border: OutlineInputBorder()),
+              validator: (val) => val == null || val.trim().isEmpty ? 'Lütfen bir isim girin' : null,
+            ),
+            const SizedBox(height: 16),
+
+            TextFormField(
+              controller: _bakiyeController,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+              decoration: const InputDecoration(labelText: 'Mevcut Bakiye (Borçlar için - yazın)', border: OutlineInputBorder(), prefixIcon: Icon(Icons.currency_lira)),
+              validator: (val) {
+                if (val == null || val.isEmpty) return null;
+                if (double.tryParse(val) == null) return 'Geçerli bir sayı girin';
+                return null;
+              },
+            ),
+
+            if (_secilenTur == HesapTuru.kmh) ...[
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _limitController,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(
+                  labelText: 'Toplam KMH Limiti (Örn: 150000)',
+                  border: OutlineInputBorder(),
+                  prefixIcon: Icon(Icons.account_balance),
+                ),
+                validator: (val) => _sayiKontrol(val, isRequired: true, max: 9999999),
+              ),
+            ],
+
+            if (_secilenTur == HesapTuru.krediKarti || _secilenTur == HesapTuru.kmh) ...[
+              const SizedBox(height: 24),
+              const Divider(),
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8.0),
+                child: Text('Kart / KMH Detayları', style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+              TextFormField(
+                controller: _kesimGunuController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'Varsayılan Kesim Günü', hintText: 'Örn: 25', border: OutlineInputBorder()),
+                validator: (val) => _sayiKontrol(val, max: 31),
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _odemeGunuController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'Varsayılan Ödeme Günü', hintText: 'Örn: 14', border: OutlineInputBorder()),
+                validator: (val) => _sayiKontrol(val, max: 31),
+              ),
+            ],
+
+            if (_secilenTur == HesapTuru.kmh) ...[
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _faizOraniController,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(labelText: 'Aylık Faiz Oranı (%)', hintText: 'Örn: 4.25', border: OutlineInputBorder()),
+                validator: (val) => _sayiKontrol(val, isRequired: true, max: 100),
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _asgariOranController,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(labelText: 'Asgari Ödeme Oranı (%)', hintText: 'Örn: 20', border: OutlineInputBorder()),
+                validator: (val) => _sayiKontrol(val, isRequired: true, max: 100),
+              ),
+            ],
+
+            const SizedBox(height: 32),
+            
+            FilledButton(
+              onPressed: _kaydediliyor ? null : _kaydet,
+              style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 16)),
+              child: _kaydediliyor
+                  ? const SizedBox(height: 24, width: 24, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                  : Text(widget.mevcutHesap != null ? 'Hesabı Güncelle' : 'Hesabı Kaydet', style: const TextStyle(fontSize: 16)),
+            ),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String? _sayiKontrol(String? val, {bool isRequired = false, int max = 100}) {
+    if (val == null || val.isEmpty) return isRequired ? 'Bu alan zorunlu' : null;
+    final sayi = double.tryParse(val);
+    if (sayi == null) return 'Geçerli bir sayı girin';
+    if (sayi < 0 || sayi > max) return '0 ile $max arasında olmalı';
+    return null;
+  }
+}
